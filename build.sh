@@ -1,31 +1,49 @@
 #!/usr/bin/env bash
-# ClearAuth AI: standalone source installer + artifact builder.
-# Run from Project: bash build_clearauth.sh
-# Only write the implementation: bash build_clearauth.sh --write-only
-# Build without running tests: bash build_clearauth.sh --skip-tests
-# Existing application/configuration code is overwritten. Data, .env, supplied
-# tests and application records are preserved. No live Gemini calls are made.
+# ClearAuth AI: one command to write the source, install, build, test and serve. No venv.
+# Run from the Project folder (the one holding data/):
+#
+#   bash build_clearauth.sh                 # write source, install, build what is missing, test, serve
+#   bash build_clearauth.sh --skip-tests    # same, without the offline test run
+#   bash build_clearauth.sh --rebuild       # reinstall packages and rebuild every artefact
+#   bash build_clearauth.sh --api-only      # serve only the API + Swagger (no Streamlit dashboard)
+#   bash build_clearauth.sh --no-serve      # build (and test) only, then stop
+#   bash build_clearauth.sh --no-install    # trust the packages already in this Python
+#   bash build_clearauth.sh --write-only    # only write the source files
+#   API_PORT=9081 DASHBOARD_PORT=9080 HOST=0.0.0.0 bash build_clearauth.sh
+#   PYTHON=/path/to/python3.12 bash build_clearauth.sh
+#
+# Packages go straight into the chosen Python (no venv; falls back to
+# --break-system-packages on externally managed Pythons). Swagger: http://localhost:8081/docs,
+# dashboard: http://localhost:8080. Behind a VS Code / code-server proxy, the prefix is read
+# from VSCODE_PROXY_URI (or set ROOT_PATH=/proxy/8081).
+# Application/configuration code is overwritten. Data, .env, supplied tests and application
+# records are preserved. Offline tests make no live Gemini calls.
 set -euo pipefail
 trap 'printf "\nBuild stopped at line %s. Fix the reported error and rerun.\n" "$LINENO" >&2' ERR
-WRITE_ONLY=0
-SKIP_TESTS=0
+WRITE_ONLY=0; SKIP_TESTS=0; REBUILD=0; SERVE=1; DASHBOARD=1; INSTALL=1
 for arg in "$@"; do
   case "$arg" in
     --write-only) WRITE_ONLY=1 ;;
     --skip-tests) SKIP_TESTS=1 ;;
-    -h|--help)
-      printf '%s\n' 'Run from Project: bash build_clearauth.sh [--write-only] [--skip-tests]' 'Default: write source, install dependencies, build all artifacts, run offline tests.' 'No Gemini requests are made; .env and data are preserved.'
-      exit 0 ;;
-    *) printf 'Unknown option: %s\n' "$arg" >&2; exit 2 ;;
+    --rebuild) REBUILD=1 ;;
+    --no-serve) SERVE=0 ;;
+    --api-only) DASHBOARD=0 ;;
+    --no-install) INSTALL=0 ;;
+    -h|--help) awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 0 ;;
+    *) printf 'Unknown option: %s (see --help)\n' "$arg" >&2; exit 2 ;;
   esac
 done
+HOST="${HOST:-0.0.0.0}"
+API_PORT="${API_PORT:-8081}"
+DASHBOARD_PORT="${DASHBOARD_PORT:-8080}"
 if [[ ! -d data ]]; then
-  printf '%s\n' 'Run this script from the Project folder containing data/.' >&2
+  printf '%s\n' 'Run this script from (or place it in) the Project folder containing data/.' >&2
   exit 2
 fi
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-command -v "$PYTHON_BIN" >/dev/null || { printf '%s\n' 'Python 3.11+ is required.' >&2; exit 2; }
-"$PYTHON_BIN" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else "Python 3.11 or newer is required")'
+PY="${PYTHON:-${PYTHON_BIN:-python3}}"
+command -v "$PY" >/dev/null || { printf 'No %s found; install Python 3.11+ or set PYTHON=.\n' "$PY" >&2; exit 2; }
+"$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3,11) else "Python 3.11 or newer is required (set PYTHON=/path/to/python3.11+)")'
+PYTHON_BIN="$PY"
 
 # Plain, quoted heredocs: no archive, base64 payload or Python bootstrap.
 write_file() {
@@ -66,6 +84,7 @@ write_file .gitignore <<'CLEARAUTH_BC37D034BAD56458'
 .env
 .env.*
 .venv/
+.clearauth-deps
 __pycache__/
 .pytest_cache/
 *.pyc
@@ -119,35 +138,42 @@ write_file README.md <<'CLEARAUTH_B335630551682C19'
 
 Prior-authorisation screening and human-reviewed decision support for Brightwater Health Plan, implemented to the supplied p7 contracts.
 
-## Setup
+## Setup and run (one command, no venv)
 
-Run all commands from `workspace/Project`:
+From `workspace/Project` (the folder holding `data/`):
 
 ```sh
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements-py311.txt  # Python 3.11
-# Python 3.12+: pip install -r requirements-lock.txt
+bash build_clearauth.sh
 ```
 
-`requirements.txt` remains the supplied dependency specification. `requirements-lock.txt` records the versions used for validation; Python 3.12 was used for the original validation; `requirements-py311.txt` provides compatible NumPy, SciPy and NetworkX versions for Python 3.11. On platforms that do not support a locked wheel, install `requirements.txt` and rebuild all model artifacts with that environment.
+This writes the source, installs `requirements-lock.txt` (`requirements-py311.txt` on Python 3.11) straight into the current `python3` (no virtual environment; `PYTHON=/path/to/python` picks another), builds only the artefacts that are missing or stale, runs the offline checks, then starts the API and the dashboard together. Ctrl+C stops both.
 
-Configure `GEMINI_API_KEY` and `GEMINI_MODEL` in `.env`. The supplied key is a placeholder; replace it with your own configured key. Never commit `.env`. All language-model calls use the Google GenAI SDK, with automatic tool calling and SDK retries disabled. No live clinical determination is made by a model.
+| Option | Effect |
+| --- | --- |
+| `--skip-tests` | do not run the offline checks |
+| `--rebuild` | reinstall packages and rebuild every artefact |
+| `--api-only` | serve only the API + Swagger |
+| `--no-serve` | build (and test) only |
+| `--no-install` | use the packages already installed |
+| `--write-only` | only write the source files |
 
-## Build and run
+Ports: `API_PORT` (default 8081), `DASHBOARD_PORT` (default 8080), `HOST` (default 0.0.0.0). Behind a VS Code / code-server path proxy, the Swagger prefix is taken from `VSCODE_PROXY_URI`, or set `ROOT_PATH=/proxy/8081`.
+
+Configure `GEMINI_API_KEY` and `GEMINI_MODEL` in `.env`. Never commit `.env`. All language-model calls use the Google GenAI SDK, with automatic tool calling and SDK retries disabled. No live clinical determination is made by a model.
+
+## Swagger
+
+Open `http://localhost:8081/docs`. Call `POST /auth/signin` with e.g. `{"username": "maria", "password": "11111111"}` and paste the returned `session_token` into the `X-Session-Token` field of each guarded call. The build script also prints a ready-made token at start-up. Signing the same user in again replaces their token, so use different users in Swagger and the dashboard.
+
+## Individual steps
 
 ```sh
-python run_database_setup.py
-python run_data_pipeline.py
-python run_model_training.py
-python run_knowledge_indexing.py
-python run_api_service.py
-```
-
-In another terminal, with the same environment:
-
-```sh
-python -m streamlit run run_dashboard.py
+python3 run_database_setup.py
+python3 run_data_pipeline.py
+python3 run_model_training.py
+python3 run_knowledge_indexing.py
+python3 run_api_service.py
+python3 -m streamlit run run_dashboard.py   # second terminal
 ```
 
 The dashboard is at `http://localhost:8080`; REST documentation is at `http://localhost:8081/docs`. Knowledge indexing downloads `all-MiniLM-L6-v2` on first use, unless it is already cached. Keep the embedding cache available when running offline. The service checks that build artifacts exist before importing runtime components.
@@ -1778,6 +1804,7 @@ write_file config/__init__.py <<'CLEARAUTH_E192B8EB2490FD56'
 
 CLEARAUTH_E192B8EB2490FD56
 write_file config/config.py <<'CLEARAUTH_AE543E8F0B6EACCB'
+import os
 from decimal import Decimal
 
 RAW_AUTHORISATION_HISTORY_TRAIN_FILE = "data/authorisation_history_train.csv"
@@ -3011,8 +3038,8 @@ CHAT_AWAITING_DECISION_TEMPLATE = ("It waits for a UM Nurse Reviewer's decision;
 CHAT_DECIDED_TEMPLATE = ('{decided_by}, {decided_by_role}, decided {decision}. The reason given: '
                          '"{decision_reason}"')
 
-API_HOST = "0.0.0.0"
-API_PORT = 8081
+API_HOST = os.environ.get("CLEARAUTH_API_HOST", "0.0.0.0")
+API_PORT = int(os.environ.get("CLEARAUTH_API_PORT", "8081"))
 API_TITLE = "ClearAuth AI API"
 API_BASE_URL = f"http://localhost:{API_PORT}"
 API_REQUEST_TIMEOUT_SECONDS = 300
@@ -10750,35 +10777,232 @@ if [[ "$WRITE_ONLY" == 1 ]]; then
   printf '%s\n' 'Source installation complete. No dependencies installed and no data or database changed.'
   exit 0
 fi
+say()  { printf '\n\033[1;34m==> %s\033[0m\n' "$*"; }
+note() { printf '    %s\n' "$*"; }
+warn() { printf '\033[1;33m    ! %s\033[0m\n' "$*"; }
+
+# ------------------------------------------------------------------ 1. Inputs
 for required in data/authorisation_history_train.csv data/authorisation_history_eval.csv data/surgical_stays_train.csv data/surgical_stays_eval.csv data/clinical_note_sentences.csv data/input/open_requests.csv data/input/request_notes.csv; do
   [[ -f "$required" ]] || { printf 'Missing input: %s\n' "$required" >&2; exit 2; }
 done
-"$PYTHON_BIN" -c 'from pathlib import Path; p=Path("data/docs"); n=sum(x.is_file() and x.suffix.lower()==".pdf" for x in p.iterdir()) if p.is_dir() else 0; assert n==16, "Expected sixteen supplied PDFs in data/docs"'
-if [[ ! -x .venv/bin/python ]]; then
-  "$PYTHON_BIN" -m venv .venv
+"$PY" -c 'from pathlib import Path; p=Path("data/docs"); n=sum(x.is_file() and x.suffix.lower()==".pdf" for x in p.iterdir()) if p.is_dir() else 0; assert n==16, "Expected sixteen supplied PDFs in data/docs"'
+
+# Check both ports now, before the long build, so a taken port fails at once.
+port_in_use() {
+  "$PY" - "$1" "$2" <<'PYEOF'
+import socket, sys
+probe = socket.socket()
+probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    probe.bind((sys.argv[1], int(sys.argv[2])))
+except OSError:
+    sys.exit(0)
+finally:
+    probe.close()
+sys.exit(1)
+PYEOF
+}
+explain_port() {
+  printf 'Port %s on %s is already in use (%s cannot start).\n' "$2" "$1" "$3" >&2
+  command -v lsof >/dev/null 2>&1 && lsof -nP -iTCP:"$2" -sTCP:LISTEN >&2 || true
+  printf '%s\n' 'Stop that process (often an earlier run: kill <PID>) or pick another port,' \
+    "e.g.  API_PORT=$((API_PORT + 10)) DASHBOARD_PORT=$((DASHBOARD_PORT + 10)) bash $(basename "$0")" >&2
+  exit 1
+}
+if [[ "$SERVE" == 1 ]]; then
+  port_in_use "$HOST" "$API_PORT" && explain_port "$HOST" "$API_PORT" "the API"
+  if [[ "$DASHBOARD" == 1 ]]; then
+    port_in_use "$HOST" "$DASHBOARD_PORT" && explain_port "$HOST" "$DASHBOARD_PORT" "the dashboard"
+  fi
 fi
-PY=.venv/bin/python
-"$PY" -c 'import sys; assert sys.version_info >= (3,11), "Remove or rename the incompatible .venv, then rerun with Python 3.11+"'
-printf '\n%s\n' '[1/6] Installing the validated dependency versions'
+
+# ------------------------------------------------------------------ 2. Python packages (no venv)
+say "Python packages (no venv): $("$PY" -c 'import sys; print(sys.executable, sys.version.split()[0])')"
 if [[ "$("$PY" -c 'import sys; print("%s.%s" % sys.version_info[:2])')" == "3.11" ]]; then
-  "$PY" -m pip install -r requirements-py311.txt
+  REQ_FILE=requirements-py311.txt
 else
-  "$PY" -m pip install -r requirements-lock.txt
+  REQ_FILE=requirements-lock.txt
 fi
-printf '\n%s\n' '[2/6] Creating database tables and seed accounts (existing records retained)'
+# A stamp records which interpreter and requirements file were last installed, so reruns
+# skip pip entirely unless one of them changed.
+DEPS_STAMP=.clearauth-deps
+DEPS_KEY="$("$PY" -c 'import sys; print(sys.executable)') $(cksum < "$REQ_FILE" | tr -s ' ' '-')"
+pip_install() {
+  local log; log="$(mktemp)"
+  if "$PY" -m pip install -q --disable-pip-version-check "$@" >"$log" 2>&1; then rm -f "$log"; return 0; fi
+  if grep -q "externally-managed-environment" "$log"; then
+    note "this Python is externally managed; retrying with --break-system-packages"
+    rm -f "$log"
+    "$PY" -m pip install -q --disable-pip-version-check --break-system-packages "$@"
+    return
+  fi
+  cat "$log" >&2; rm -f "$log"; return 1
+}
+if [[ "$INSTALL" == 0 ]]; then
+  note "skipping install (--no-install)"
+elif [[ "$REBUILD" == 0 && -f "$DEPS_STAMP" && "$(cat "$DEPS_STAMP")" == "$DEPS_KEY" ]]; then
+  note "ok    $REQ_FILE already installed into this Python"
+else
+  note "installing $REQ_FILE (first run downloads torch and friends; be patient)"
+  if pip_install -r "$REQ_FILE"; then
+    printf '%s\n' "$DEPS_KEY" > "$DEPS_STAMP"
+  else
+    warn "pinned install failed; falling back to the unpinned requirements.txt"
+    pip_install -r requirements.txt || { echo "Installing requirements failed." >&2; exit 1; }
+    printf '%s\n' "$DEPS_KEY" > "$DEPS_STAMP"
+    warn "unpinned versions installed; if the API cannot load the saved models, rerun with --rebuild"
+  fi
+fi
+
+# ------------------------------------------------------------------ 3. Build artefacts
+# A step is done when all of its outputs exist. Timestamps are deliberately ignored: unzipping
+# data, a git checkout or a copy refreshes them and would retrain models for nothing.
+# --rebuild (or deleting an output) is how you force a step to run again.
+step() {
+  local label="$1" outputs="$2" out; shift 2
+  if [[ "$REBUILD" == 0 ]]; then
+    local done=1
+    for out in $outputs; do [[ -e "$out" ]] || { done=0; break; }; done
+    if [[ "$done" == 1 ]]; then note "ok    $label (already built; --rebuild to redo)"; return 0; fi
+  fi
+  note "build $label"
+  "$PY" "$@"
+}
+say "Building artefacts (pass --rebuild to redo all)"
+note "build database tables and seed accounts (idempotent; existing records kept)"
 "$PY" run_database_setup.py
-printf '\n%s\n' '[3/6] Cleaning the five raw extracts and writing the quality report'
-"$PY" run_data_pipeline.py
-printf '\n%s\n' '[4/6] Training and evaluating the three models'
-"$PY" run_model_training.py
-printf '\n%s\n' '[5/6] Building the policy knowledge index (embedding download may be needed)'
-"$PY" run_knowledge_indexing.py
+CLEAN="processed/authorisation_history_train_clean.csv processed/authorisation_history_eval_clean.csv processed/surgical_stays_train_clean.csv processed/surgical_stays_eval_clean.csv processed/clinical_note_sentences_clean.csv"
+MODELS="output/models/approval_model.pkl output/models/stay_model.pkl output/models/evidence_model.pkl output/models/approval_features.json output/models/stay_features.json output/model_metrics.json"
+step "clean the five raw extracts" "$CLEAN output/data_quality_report.json"   run_data_pipeline.py
+step "train the three models"      "$MODELS"                                 run_model_training.py
+step "policy knowledge index"      "database/chroma_store/chroma.sqlite3"    run_knowledge_indexing.py
+
+# ------------------------------------------------------------------ 4. Offline tests
 if [[ "$SKIP_TESTS" == 0 ]]; then
-  printf '\n%s\n' '[6/6] Running supplied tests with only the external Gemini boundary mocked'
-  # Offline verification uses isolated records and never calls Gemini.
-  HF_HUB_OFFLINE=1 "$PY" verify.py --offline
-  HF_HUB_OFFLINE=1 "$PY" local_workflow_smoke.py
+  say "Offline tests (Gemini boundary mocked; no live calls)"
+  TESTS_OK=1
+  HF_HUB_OFFLINE=1 "$PY" verify.py --offline || TESTS_OK=0
+  HF_HUB_OFFLINE=1 "$PY" local_workflow_smoke.py || TESTS_OK=0
+  if [[ "$TESTS_OK" == 1 ]]; then note "all offline checks passed"; else warn "some checks failed (see above); serving anyway"; fi
 else
-  printf '\n%s\n' '[6/6] Tests skipped by --skip-tests'
+  note "tests skipped (--skip-tests)"
 fi
-printf '\n%s\n' 'ClearAuth AI build complete.' 'Start API in this terminal:' '  .venv/bin/python run_api_service.py' 'Start dashboard in a second terminal, from Project:' '  .venv/bin/python -m streamlit run run_dashboard.py' 'Dashboard: http://localhost:8080  API docs: http://localhost:8081/docs' 'Live Gemini remains untested. Configure .env before starting live reviews or chat.'
+
+if [[ "$SERVE" == 0 ]]; then
+  printf '\n%s\n' 'ClearAuth AI build complete (--no-serve). Start everything later with:' "  bash $(basename "$0") --skip-tests"
+  exit 0
+fi
+
+# ------------------------------------------------------------------ 5. Serve API (+ Swagger) and dashboard
+HAS_KEY=0
+if [[ -n "${GEMINI_API_KEY:-}" ]] || grep -Eq '^[[:space:]]*GEMINI_API_KEY[[:space:]]*=[[:space:]]*[^[:space:]#]' .env 2>/dev/null; then
+  HAS_KEY=1
+fi
+# Behind a path proxy (VS Code / code-server labs serve ports at /proxy/<port>/) Swagger must
+# know the prefix, or it fetches /openapi.json outside the proxy and stays blank. ROOT_PATH
+# wins when set (even empty); otherwise it is derived from VSCODE_PROXY_URI.
+if [[ -z "${ROOT_PATH+set}" && -n "${VSCODE_PROXY_URI:-}" ]]; then
+  PROXIED="${VSCODE_PROXY_URI//\{\{port\}\}/$API_PORT}"
+  case "$PROXIED" in
+    *://*/*) ROOT_PATH="/${PROXIED#*://*/}" ;;
+    *) ROOT_PATH="${PROXIED#.}"; ROOT_PATH="/${ROOT_PATH#/}" ;;
+  esac
+fi
+ROOT_PATH="${ROOT_PATH:-}"; ROOT_PATH="${ROOT_PATH%/}"
+export CLEARAUTH_API_PORT="$API_PORT" CLEARAUTH_API_HOST="$HOST" CLEARAUTH_ROOT_PATH="$ROOT_PATH"
+
+start_api() {
+  exec "$PY" -c '
+import os, sys, uvicorn
+sys.argv = ["run_api_service.py"]
+import run_api_service as runner
+from pathlib import Path
+missing = [(p, s) for p, s in runner.REQUIRED_BEFORE_STARTING if not Path(p).exists()]
+if missing:
+    for p, s in missing:
+        print(p, "is missing; it comes from", s)
+    raise SystemExit(1)
+from api.routes import service_application
+uvicorn.run(service_application, host=os.environ["CLEARAUTH_API_HOST"],
+            port=int(os.environ["CLEARAUTH_API_PORT"]),
+            root_path=os.environ["CLEARAUTH_ROOT_PATH"],
+            proxy_headers=True, forwarded_allow_ips="*")'
+}
+
+LOCAL_API="http://127.0.0.1:$API_PORT"
+api_up() { "$PY" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1] + "/openapi.json", timeout=2)' "$LOCAL_API" >/dev/null 2>&1; }
+DOCS_URL="http://localhost:$API_PORT/docs"
+[[ -n "$ROOT_PATH" ]] && DOCS_URL="<your lab URL>$ROOT_PATH/docs"
+
+print_access() {
+  say "ClearAuth AI is running"
+  note "Swagger UI : $DOCS_URL"
+  note "ReDoc      : http://localhost:$API_PORT/redoc     OpenAPI: http://localhost:$API_PORT/openapi.json"
+  [[ "$DASHBOARD" == 1 ]] && note "Dashboard  : http://localhost:$DASHBOARD_PORT"
+  note ""
+  note "Swagger sign-in: POST /auth/signin -> Try it out, body e.g."
+  note '    {"username": "maria", "password": "11111111"}   (UM Nurse Reviewer; also james, leena)'
+  note '    {"username": "carlos", "password": "22222222"}  (Intake Coordinator)'
+  note '    {"username": "ravi", "password": "33333333"}    (Provider Services Representative)'
+  note "Copy session_token from the response into the X-Session-Token field of each call."
+  note "(Signing the same user in again, e.g. on the dashboard, replaces that token: use"
+  note " different users in Swagger and the dashboard.)"
+  if [[ -n "${SWAGGER_TOKEN:-}" ]]; then
+    note ""
+    note "Ready-made token (signed in as $SWAGGER_USER):  X-Session-Token: $SWAGGER_TOKEN"
+  fi
+  [[ "$HAS_KEY" == 1 ]] || warn "GEMINI_API_KEY is empty in .env: browsing works, but opening reviews and chat will fail"
+  note ""
+  note "Ctrl+C stops everything."
+}
+
+# Sign a Swagger user in and grab its token, so the docs page is usable straight away.
+fetch_token() {
+  SWAGGER_USER="${SWAGGER_USER:-james}"
+  local password
+  password="$("$PY" -c 'import sys; from config import config as c; print(next((a["password"] for a in c.SEED_USER_ACCOUNTS if a["username"]==sys.argv[1]), ""))' "$SWAGGER_USER")"
+  [[ -n "$password" ]] || return 0
+  SWAGGER_TOKEN="$("$PY" - "$LOCAL_API" "$SWAGGER_USER" "$password" <<'PYEOF' || true
+import json, sys, urllib.request
+req = urllib.request.Request(sys.argv[1] + "/auth/signin",
+    data=json.dumps({"username": sys.argv[2], "password": sys.argv[3]}).encode(),
+    headers={"Content-Type": "application/json"})
+print(json.load(urllib.request.urlopen(req, timeout=10))["session_token"])
+PYEOF
+)"
+}
+
+if [[ "$DASHBOARD" == 0 ]]; then
+  # API only: print access info once it answers, keep uvicorn in the foreground.
+  ( for _ in $(seq 1 120); do
+      if api_up; then fetch_token; print_access; exit 0; fi
+      sleep 1
+    done ) &
+  ( start_api )
+  exit $?
+fi
+
+say "Starting the API on port $API_PORT (log: output/api_service.log)"
+mkdir -p output
+( start_api ) > output/api_service.log 2>&1 &
+API_PID=$!
+cleanup() { kill "$API_PID" 2>/dev/null || true; wait "$API_PID" 2>/dev/null || true; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+for _ in $(seq 1 180); do
+  api_up && break
+  if ! kill -0 "$API_PID" 2>/dev/null; then
+    echo "The API exited during start-up. Last log lines:" >&2
+    tail -n 30 output/api_service.log >&2
+    exit 1
+  fi
+  sleep 1
+done
+api_up || { echo "The API did not answer within 180s; see output/api_service.log" >&2; exit 1; }
+note "API is up"
+fetch_token
+print_access
+say "Starting the dashboard on port $DASHBOARD_PORT"
+"$PY" -m streamlit run run_dashboard.py \
+  --server.port "$DASHBOARD_PORT" --server.address "$HOST" \
+  --server.headless true --browser.gatherUsageStats false
